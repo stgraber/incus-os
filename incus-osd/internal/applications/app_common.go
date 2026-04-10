@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -25,9 +24,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/lxc/incus/v6/shared/api"
+	incusapi "github.com/lxc/incus/v6/shared/api"
 	"github.com/lxc/incus/v6/shared/revert"
 
+	"github.com/lxc/incus-os/incus-osd/api"
 	"github.com/lxc/incus-os/incus-osd/internal/rest/response"
 	"github.com/lxc/incus-os/incus-osd/internal/state"
 	"github.com/lxc/incus-os/incus-osd/internal/systemd"
@@ -35,6 +35,8 @@ import (
 
 type common struct {
 	state *state.State
+
+	appState *api.ApplicationState
 }
 
 func (*common) Name() string {
@@ -102,6 +104,16 @@ func (*common) Update(_ context.Context) error {
 	return nil
 }
 
+// IsInstalled reports whether the application has been installed.
+func (a *common) IsInstalled() bool {
+	return a.appState.Version != ""
+}
+
+// IsInitialized reports whether the application has been initialized.
+func (a *common) IsInitialized() bool {
+	return a.appState.Initialized
+}
+
 // IsPrimary reports if the application is a primary application.
 func (*common) IsPrimary() bool {
 	return false
@@ -135,6 +147,11 @@ func (*common) GetBackup(_ io.Writer, _ bool) error {
 // RestoreBackup restores a tar archive backup of the application's configuration and/or state.
 func (*common) RestoreBackup(_ context.Context, _ io.Reader) error {
 	return errors.New("not supported")
+}
+
+// Version returns the installed version.
+func (a *common) Version() string {
+	return a.appState.Version
 }
 
 // Common helper to construct an HTTP client using the provided local Unix socket.
@@ -192,7 +209,7 @@ func doRequest(ctx context.Context, socket string, url string, method string, bo
 	}
 	defer resp.Body.Close()
 
-	r := &api.ResponseRaw{}
+	r := &incusapi.ResponseRaw{}
 
 	err = json.NewDecoder(resp.Body).Decode(r)
 	if err != nil {
@@ -486,87 +503,4 @@ func extractTarArchive(ctx context.Context, archiveRoot string, restartUnits []s
 	reverter.Success()
 
 	return nil
-}
-
-// UninstallApplication removes the given application from the state, wipes any local
-// data, and removes the sysext image for the application.
-func UninstallApplication(ctx context.Context, s *state.State, name string) error {
-	// Load the application.
-	app, err := Load(ctx, s, name)
-	if err != nil {
-		return err
-	}
-
-	// Can't remove a primary application.
-	if app.IsPrimary() {
-		return errors.New("cannot remove a primary application")
-	}
-
-	// Stop the application.
-	err = app.Stop(ctx)
-	if err != nil {
-		return err
-	}
-
-	// Wipe local data.
-	err = app.WipeLocalData(ctx)
-	if err != nil {
-		return err
-	}
-
-	// Remove application from the state.
-	delete(s.Applications, app.Name())
-
-	// Remove the sysext image.
-	err = systemd.RemoveExtension(ctx, app.Name())
-	if err != nil {
-		return err
-	}
-
-	// Save the state to disk.
-	return s.Save()
-}
-
-// StartInitialize starts the specified application, and if needed performs initialization actions.
-func StartInitialize(ctx context.Context, s *state.State, appName string) error {
-	// Get the application.
-	app, err := Load(ctx, s, appName)
-	if err != nil {
-		return err
-	}
-
-	// At this point, we know the application will exist in the map.
-	appInfo := s.Applications[appName]
-
-	// Start the application.
-	slog.InfoContext(ctx, "Starting application", "name", appName, "version", appInfo.State.Version)
-
-	err = app.Start(ctx)
-	if err != nil {
-		return err
-	}
-
-	// Run initialization if needed.
-	if !appInfo.State.Initialized {
-		slog.InfoContext(ctx, "Initializing application", "name", appName, "version", appInfo.State.Version)
-
-		err = app.Initialize(ctx)
-		if err != nil {
-			return err
-		}
-
-		appInfo.State.Initialized = true
-		s.Applications[appName] = appInfo
-	}
-
-	// If the application has a TLS certificate, print its fingerprint so the user can verify it when initially connecting.
-	cert, err := app.GetServerCertificate()
-	if err == nil {
-		rawFp := sha256.Sum256(cert.Certificate[0])
-
-		slog.InfoContext(ctx, "Application TLS certificate fingerprint", "name", appName, "fingerprint", hex.EncodeToString(rawFp[:]))
-	}
-
-	// Save the state to disk.
-	return s.Save()
 }

@@ -262,8 +262,13 @@ func processNewState(ctx context.Context, s *state.State, skipOptions []string) 
 
 	havePrimaryApp := false
 
-	for app := range newState.Applications {
-		if app == "incus" || app == "migration-manager" || app == "operations-center" {
+	apps, err := applications.GetInstalled(ctx, newState)
+	if err != nil {
+		return err
+	}
+
+	for _, app := range apps {
+		if app.IsPrimary() {
 			havePrimaryApp = true
 
 			break
